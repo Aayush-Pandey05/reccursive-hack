@@ -81,9 +81,58 @@ async function addDeadlinesToCalendar(accessToken, deadlines) {
   return createdCount;
 }
 
+// ✅ NEW: Function to get summary prompt based on type
+function getSummaryPrompt(summaryType) {
+  const basePrompt =
+    "You are an expert meeting summarizer. Analyze the following meeting transcript and create a ";
+
+  switch (summaryType) {
+    case "brief":
+      return (
+        basePrompt +
+        `concise summary that includes:
+      - 3-5 key discussion points
+      - Main decisions made
+      - Critical action items only
+      - Next steps (if any)
+      
+      Keep the summary under 200 words and focus on the most essential information.`
+      );
+
+    case "detailed":
+      return (
+        basePrompt +
+        `comprehensive summary that includes:
+      - Detailed overview of all topics discussed
+      - Key arguments and viewpoints presented
+      - All decisions made with context
+      - Complete list of action items and responsibilities
+      - Background information and reasoning
+      - Follow-up items and next steps
+      - Important quotes or specific details mentioned
+      
+      Provide a thorough analysis while maintaining clarity and organization.`
+      );
+
+    default:
+      // Fallback to brief if invalid type
+      return (
+        basePrompt +
+        `concise summary focusing on key points, decisions, and action items. Keep it under 200 words.`
+      );
+  }
+}
+
 // --- Main Controller Logic ---
 export const summary = async (req, res) => {
-  const { transcript, userEmail, accessToken } = req.body;
+  // ✅ MODIFIED: Extract summaryType from request body (default to "brief")
+  const {
+    transcript,
+    userEmail,
+    accessToken,
+    summaryType = "brief",
+  } = req.body;
+
   if (!transcript || !userEmail || !accessToken) {
     return res
       .status(400)
@@ -99,20 +148,37 @@ export const summary = async (req, res) => {
       temperature: 0.1,
     });
 
-    // --- 1. Summarization (No changes) ---
+    // ✅ MODIFIED: Summarization with dynamic prompt based on summary type
     const textSplitter = new RecursiveCharacterTextSplitter({
       chunkSize: 3000,
       chunkOverlap: 200,
     });
     const docs = await textSplitter.createDocuments([transcript]);
-    const summaryChain = loadSummarizationChain(model, { type: "map_reduce" });
-    console.log("Generating summary...");
-    const summaryResult = await summaryChain.invoke({ input_documents: docs });
-    const summaryText = summaryResult.text;
 
-    // --- 2. Deadline Extraction with a Stricter Prompt ---
+    // ✅ NEW: Use custom prompt for different summary types
+    const customPrompt = getSummaryPrompt(summaryType);
+
+    // For brief summaries, we can use a more direct approach
+    if (summaryType === "brief") {
+      console.log("Generating brief summary...");
+      const briefSummaryPrompt = `${customPrompt}\n\nTranscript:\n---\n${transcript}\n---\n\nBrief Summary:`;
+      const summaryResult = await model.invoke(briefSummaryPrompt);
+      var summaryText = summaryResult.content;
+    } else {
+      // For detailed summaries, use the existing map-reduce chain
+      console.log("Generating detailed summary...");
+      const summaryChain = loadSummarizationChain(model, {
+        type: "map_reduce",
+        combinePrompt: customPrompt,
+      });
+      const summaryResult = await summaryChain.invoke({
+        input_documents: docs,
+      });
+      var summaryText = summaryResult.text;
+    }
+
+    // --- 2. Deadline Extraction with a Stricter Prompt (No changes) ---
     console.log("Extracting deadlines...");
-    // ✅ FINAL FIX: This new prompt is much stricter to prevent the AI from returning plain text.
     const deadlineExtractionPrompt = `
       Analyze the following meeting transcript. Your task is to identify specific tasks, action items, or deadlines.
       Today's date is ${new Date().toISOString().split("T")[0]}.
@@ -147,16 +213,21 @@ export const summary = async (req, res) => {
     // --- 3. Add Deadlines to Calendar (No changes) ---
     const eventsCreated = await addDeadlinesToCalendar(accessToken, deadlines);
 
-    // --- 4. Generate PDF (No changes) ---
+    // ✅ MODIFIED: Generate PDF with summary type indication
     const doc = new PDFDocument({ margin: 50 });
     const stream = fs.createWriteStream(pdfPath);
     doc.pipe(stream);
+
+    // ✅ NEW: Include summary type in PDF title
+    const summaryTypeLabel = summaryType === "brief" ? "Brief" : "Detailed";
     doc
       .fontSize(20)
       .font("Helvetica-Bold")
-      .text("Meeting Summary", { align: "center" })
+      .text(`${summaryTypeLabel} Meeting Summary`, { align: "center" })
       .moveDown();
+
     doc.fontSize(12).font("Helvetica").text(summaryText, { align: "justify" });
+
     if (deadlines && deadlines.length > 0) {
       doc
         .addPage()
@@ -187,8 +258,9 @@ export const summary = async (req, res) => {
     // --- 5. Send Email (No changes) ---
     await sendSummaryByEmail(accessToken, userEmail, summaryText, pdfBuffer);
 
+    // ✅ MODIFIED: Include summary type in success message
     res.json({
-      message: `Summary sent! ${eventsCreated} deadline(s) were added to your calendar.`,
+      message: `${summaryTypeLabel} summary sent! ${eventsCreated} deadline(s) were added to your calendar.`,
     });
   } catch (error) {
     console.error("Error during summarization process:", error);

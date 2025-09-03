@@ -7,6 +7,8 @@ function App() {
   const [transcript, setTranscript] = useState("");
   const [status, setStatus] = useState("idle");
   const [message, setMessage] = useState("");
+  // ✅ NEW: Summary type selection state
+  const [summaryType, setSummaryType] = useState("brief");
   const activeTabId = useRef(null);
 
   // This effect runs once to load all persistent state from storage
@@ -22,14 +24,16 @@ function App() {
       }
     });
 
-    // Load user email, transcript, and capturing state from storage
+    // Load user email, transcript, capturing state, and summary type from storage
     chrome.storage.local.get(
-      ["gmeet_user_email", "gmeet_transcript", "isCapturing"],
+      ["gmeet_user_email", "gmeet_transcript", "isCapturing", "summaryType"],
       (result) => {
         if (result.gmeet_user_email)
           setUser({ email: result.gmeet_user_email });
         if (result.gmeet_transcript) setTranscript(result.gmeet_transcript);
         if (result.isCapturing) setIsCapturing(result.isCapturing);
+        // ✅ NEW: Load saved summary type preference
+        if (result.summaryType) setSummaryType(result.summaryType);
       }
     );
 
@@ -110,7 +114,14 @@ function App() {
     );
   };
 
-  // ✅ FINAL, ROBUST VERSION of handleSummarize
+  // ✅ NEW: Handle summary type selection
+  const handleSummaryTypeChange = (type) => {
+    setSummaryType(type);
+    // Save preference to storage
+    chrome.storage.local.set({ summaryType: type });
+  };
+
+  // ✅ MODIFIED: Updated handleSummarize to include summary type
   const handleSummarize = () => {
     if (!user?.email) return setMessage("Please sign in first.");
     if (!transcript) return setMessage("Please record a transcript first.");
@@ -133,11 +144,12 @@ function App() {
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            // Send the fresh token with the request
+            // ✅ MODIFIED: Send the summary type along with other data
             body: JSON.stringify({
               transcript,
               userEmail: user.email,
               accessToken: token,
+              summaryType, // ✅ NEW: Include summary type
             }),
           }
         );
@@ -160,7 +172,7 @@ function App() {
 
   return (
     <div className="w-[380px] bg-slate-50 text-slate-800 p-4 font-sans text-center">
-      {/* --- UI REMAINS THE SAME --- */}
+      {/* --- HEADER REMAINS THE SAME --- */}
       <header className="flex items-center justify-center gap-2 pb-3 mb-4 border-b border-slate-200">
         <img src="/vite.svg" className="h-8 w-8" alt="logo" />
         <h1 className="text-lg font-semibold text-slate-700">
@@ -193,6 +205,41 @@ function App() {
                 Sign Out
               </button>
             </div>
+
+            {/* ✅ NEW: Summary Type Selection */}
+            <div className="text-left">
+              <p className="text-sm font-medium text-slate-600 mb-2">
+                Summary Type:
+              </p>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => handleSummaryTypeChange("brief")}
+                  className={`flex-1 p-2 text-sm font-medium rounded-md transition-colors ${
+                    summaryType === "brief"
+                      ? "bg-blue-600 text-white"
+                      : "bg-slate-200 text-slate-700 hover:bg-slate-300"
+                  }`}
+                >
+                  Brief
+                </button>
+                <button
+                  onClick={() => handleSummaryTypeChange("detailed")}
+                  className={`flex-1 p-2 text-sm font-medium rounded-md transition-colors ${
+                    summaryType === "detailed"
+                      ? "bg-blue-600 text-white"
+                      : "bg-slate-200 text-slate-700 hover:bg-slate-300"
+                  }`}
+                >
+                  Detailed
+                </button>
+              </div>
+              <p className="text-xs text-slate-500 mt-1">
+                {summaryType === "brief"
+                  ? "Concise key points and action items"
+                  : "Comprehensive summary with full context"}
+              </p>
+            </div>
+
             <button
               onClick={handleToggleCapture}
               disabled={isLoading}
@@ -223,7 +270,11 @@ function App() {
               disabled={isLoading || isCapturing || !transcript}
               className="w-full p-2.5 bg-green-600 text-white font-semibold rounded-md hover:bg-green-700 disabled:bg-slate-400"
             >
-              {status === "summarizing" ? "Working..." : "Summarize & Save"}
+              {status === "summarizing"
+                ? "Working..."
+                : `Create ${
+                    summaryType === "brief" ? "Brief" : "Detailed"
+                  } Summary`}
             </button>
           </>
         )}
