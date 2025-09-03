@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "GMeet Summarizer",
+  "version": "1.0",
+  "description": "Captures Google Meet captions and summarizes the meeting.",
+  "permissions": ["storage", "activeTab", "scripting"],
+  "action": {
+    "default_popup": "index.html"
+  },
+  "host_permissions": ["https://meet.google.com/*"],
+  "web_accessible_resources": [
+    {
+      "resources": ["content.js"],
+      "matches": ["https://meet.google.com/*"]
+    }
+  ]
+}
