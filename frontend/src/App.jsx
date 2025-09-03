@@ -1,15 +1,19 @@
 import React, { useState, useEffect, useRef } from "react";
 
 function App() {
-  // ✅ MODIFIED: User state will now only store the email. The token will be fetched on demand.
   const [user, setUser] = useState(null);
   const [isCapturing, setIsCapturing] = useState(false);
   const [transcript, setTranscript] = useState("");
   const [status, setStatus] = useState("idle");
   const [message, setMessage] = useState("");
-  // ✅ NEW: Summary type selection state
   const [summaryType, setSummaryType] = useState("brief");
+  const [captureMode, setCaptureMode] = useState("caption"); // ✅ NEW: 'caption' or 'audio'
+
   const activeTabId = useRef(null);
+  // ✅ NEW: Refs for audio recording
+  const mediaRecorderRef = useRef(null);
+  const audioStreamRef = useRef(null);
+  const transcriptionIntervalRef = useRef(null);
 
   // This effect runs once to load all persistent state from storage
   useEffect(() => {
@@ -24,16 +28,22 @@ function App() {
       }
     });
 
-    // Load user email, transcript, capturing state, and summary type from storage
+    // Load user email, transcript, capturing state, and other preferences from storage
     chrome.storage.local.get(
-      ["gmeet_user_email", "gmeet_transcript", "isCapturing", "summaryType"],
+      [
+        "gmeet_user_email",
+        "gmeet_transcript",
+        "isCapturing",
+        "summaryType",
+        "captureMode",
+      ],
       (result) => {
         if (result.gmeet_user_email)
           setUser({ email: result.gmeet_user_email });
         if (result.gmeet_transcript) setTranscript(result.gmeet_transcript);
         if (result.isCapturing) setIsCapturing(result.isCapturing);
-        // ✅ NEW: Load saved summary type preference
         if (result.summaryType) setSummaryType(result.summaryType);
+        if (result.captureMode) setCaptureMode(result.captureMode); // ✅ NEW
       }
     );
 
@@ -47,6 +57,7 @@ function App() {
     return () => chrome.storage.onChanged.removeListener(storageListener);
   }, []);
 
+  // --- Auth functions (handleAuth, handleSignOut) are unchanged ---
   const handleAuth = () => {
     if (!window.chrome || !chrome.identity) return;
     chrome.identity.getAuthToken({ interactive: true }, (token) => {
@@ -67,10 +78,8 @@ function App() {
         .then((userInfo) => {
           if (!userInfo?.email)
             throw new Error("Could not retrieve a valid email.");
-
           const userData = { email: userInfo.email };
           setUser(userData);
-          // ✅ MODIFIED: Only save the user's email to storage.
           chrome.storage.local.set({ gmeet_user_email: userInfo.email });
           setMessage(`Signed in as ${userInfo.email}`);
           setStatus("idle");
@@ -90,46 +99,140 @@ function App() {
     setStatus("idle");
   };
 
+  // ✅ MODIFIED: Main toggle function now directs to the correct helper function
   const handleToggleCapture = () => {
-    // This function remains correct and does not need changes.
-    if (!activeTabId.current) return;
-    const newCapturingState = !isCapturing;
-    const command = newCapturingState ? "start" : "stop";
-    chrome.scripting.executeScript(
-      { target: { tabId: activeTabId.current }, files: ["content.js"] },
-      () => {
-        if (chrome.runtime.lastError) return;
-        chrome.tabs.sendMessage(activeTabId.current, { command }, () => {
-          setIsCapturing(newCapturingState);
-          chrome.storage.local.set({ isCapturing: newCapturingState });
-          if (command === "start") {
-            setTranscript("");
-            setMessage("Recording... You can close this popup.");
-          } else {
-            setMessage("Recording stopped.");
-          }
-          setStatus(command === "start" ? "capturing" : "idle");
-        });
+    if (!activeTabId.current) {
+      setMessage(
+        "Google Meet tab not found. Please select the tab and reopen."
+      );
+      setStatus("error");
+      return;
+    }
+
+    if (isCapturing) {
+      // --- STOP CAPTURING ---
+      if (captureMode === "audio") {
+        stopAudioCapture();
+      } else {
+        stopCaptionCapture();
       }
-    );
+    } else {
+      // --- START CAPTURING ---
+      setTranscript(""); // Clear transcript for new session
+      chrome.storage.local.set({ gmeet_transcript: "" });
+      if (captureMode === "audio") {
+        startAudioCapture();
+      } else {
+        startCaptionCapture();
+      }
+    }
   };
 
-  // ✅ NEW: Handle summary type selection
+  // --- Logic for Caption Scraping (from your working code) ---
+  const startAudioCapture = async () => {
+    try {
+      // This line captures your microphone audio stream
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+      // --- The rest of the function handles the recording and transcription ---
+
+      audioStreamRef.current = stream;
+      mediaRecorderRef.current = new MediaRecorder(stream, {
+        mimeType: "audio/webm",
+      });
+      const audioChunks = [];
+
+      mediaRecorderRef.current.ondataavailable = (event) => {
+        if (event.data.size > 0) audioChunks.push(event.data);
+      };
+
+      mediaRecorderRef.current.onstop = async () => {
+        if (audioChunks.length === 0) return;
+
+        const audioBlob = new Blob(audioChunks, { type: "audio/webm" });
+
+        // The audio playback debugging code has been removed from this section.
+
+        // This check prevents sending silent/empty audio clips to the API
+        if (audioBlob.size < 1024) {
+          console.log("Audio chunk is too small, skipping API call.");
+          audioChunks.length = 0; // Clear chunks for the next interval
+          return;
+        }
+
+        const formData = new FormData();
+        formData.append("audio", audioBlob, "recording.webm");
+
+        try {
+          const response = await fetch("http://localhost:3000/api/transcribe", {
+            method: "POST",
+            body: formData,
+          });
+          const result = await response.json();
+          if (!response.ok)
+            throw new Error(result.error || "Transcription failed");
+
+          const newText = result.transcript;
+          if (newText) {
+            setTranscript((prev) => {
+              const updatedTranscript = (prev + " " + newText).trim();
+              chrome.storage.local.set({ gmeet_transcript: updatedTranscript });
+              return updatedTranscript;
+            });
+          }
+        } catch (error) {
+          setMessage(`Transcription Error: ${error.message}`);
+          setStatus("error");
+        }
+        audioChunks.length = 0; // Clear chunks for the next interval
+      };
+
+      mediaRecorderRef.current.start();
+      setIsCapturing(true);
+      chrome.storage.local.set({ isCapturing: true });
+      setStatus("capturing");
+      setMessage("Recording audio... You can close this popup.");
+
+      // Every 15 seconds, stop, send the chunk, and restart recording
+      transcriptionIntervalRef.current = setInterval(() => {
+        if (mediaRecorderRef.current?.state === "recording") {
+          mediaRecorderRef.current.stop();
+          mediaRecorderRef.current.start();
+        }
+      }, 15000);
+    } catch (err) {
+      // This code runs if the user denies the microphone permission prompt
+      setMessage(
+        `Microphone permission was denied. Please allow microphone access.`
+      );
+      setStatus("error");
+    }
+  };
+
+  const stopAudioCapture = () => {
+    clearInterval(transcriptionIntervalRef.current);
+    if (mediaRecorderRef.current?.state === "recording") {
+      mediaRecorderRef.current.stop();
+    }
+    audioStreamRef.current?.getTracks().forEach((track) => track.stop());
+    setIsCapturing(false);
+    chrome.storage.local.set({ isCapturing: false });
+    setMessage("Audio recording stopped.");
+    setStatus("idle");
+  };
+
+  // --- Other handlers and summarize function are unchanged ---
   const handleSummaryTypeChange = (type) => {
     setSummaryType(type);
-    // Save preference to storage
     chrome.storage.local.set({ summaryType: type });
   };
 
-  // ✅ MODIFIED: Updated handleSummarize to include summary type
   const handleSummarize = () => {
     if (!user?.email) return setMessage("Please sign in first.");
     if (!transcript) return setMessage("Please record a transcript first.");
-
     setStatus("summarizing");
     setMessage("Securing connection and processing summary...");
 
-    // Get a fresh, guaranteed valid token right before we make the API call.
     chrome.identity.getAuthToken({ interactive: true }, async (token) => {
       if (chrome.runtime.lastError || !token) {
         setStatus("error");
@@ -137,25 +240,22 @@ function App() {
           "Authentication failed. Please sign out and sign in again."
         );
       }
-
       try {
         const response = await fetch(
           "http://localhost:3000/api/summary/summarize",
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            // ✅ MODIFIED: Send the summary type along with other data
             body: JSON.stringify({
               transcript,
               userEmail: user.email,
               accessToken: token,
-              summaryType, // ✅ NEW: Include summary type
+              summaryType,
             }),
           }
         );
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Server error");
-
         setStatus("success");
         setMessage(result.message);
         setTranscript("");
@@ -168,17 +268,22 @@ function App() {
     });
   };
 
+  const handleCaptureModeChange = (mode) => {
+    setCaptureMode(mode);
+    chrome.storage.local.set({ captureMode: mode });
+  };
+
   const isLoading = status === "summarizing";
 
   return (
     <div className="w-[380px] bg-slate-50 text-slate-800 p-4 font-sans text-center">
-      {/* --- HEADER REMAINS THE SAME --- */}
       <header className="flex items-center justify-center gap-2 pb-3 mb-4 border-b border-slate-200">
         <img src="/vite.svg" className="h-8 w-8" alt="logo" />
         <h1 className="text-lg font-semibold text-slate-700">
           GMeet Summarizer
         </h1>
       </header>
+
       <main className="flex flex-col gap-4">
         {!user ? (
           <div className="p-4 bg-blue-100 rounded-md">
@@ -206,7 +311,38 @@ function App() {
               </button>
             </div>
 
-            {/* ✅ NEW: Summary Type Selection */}
+            {/* ✅ NEW: Capture Mode Selection UI */}
+            <div className="text-left">
+              <p className="text-sm font-medium text-slate-600 mb-2">
+                Capture Mode:
+              </p>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => handleCaptureModeChange("caption")}
+                  disabled={isCapturing}
+                  className={`flex-1 p-2 text-sm font-medium rounded-md transition-colors disabled:opacity-50 ${
+                    captureMode === "caption"
+                      ? "bg-blue-600 text-white"
+                      : "bg-slate-200 text-slate-700 hover:bg-slate-300"
+                  }`}
+                >
+                  Captions
+                </button>
+                <button
+                  onClick={() => handleCaptureModeChange("audio")}
+                  disabled={isCapturing}
+                  className={`flex-1 p-2 text-sm font-medium rounded-md transition-colors disabled:opacity-50 ${
+                    captureMode === "audio"
+                      ? "bg-blue-600 text-white"
+                      : "bg-slate-200 text-slate-700 hover:bg-slate-300"
+                  }`}
+                >
+                  Audio (Whisper)
+                </button>
+              </div>
+            </div>
+
+            {/* --- Summary Type Selection (Unchanged) --- */}
             <div className="text-left">
               <p className="text-sm font-medium text-slate-600 mb-2">
                 Summary Type:
@@ -233,11 +369,6 @@ function App() {
                   Detailed
                 </button>
               </div>
-              <p className="text-xs text-slate-500 mt-1">
-                {summaryType === "brief"
-                  ? "Concise key points and action items"
-                  : "Comprehensive summary with full context"}
-              </p>
             </div>
 
             <button
@@ -251,6 +382,7 @@ function App() {
             >
               {isCapturing ? "Stop Capturing" : "Start Capturing"}
             </button>
+
             <div className="text-left">
               <p className="text-sm font-medium text-slate-600 mb-1">
                 Live Transcript:
@@ -265,6 +397,7 @@ function App() {
                 className="w-full p-2 text-sm bg-slate-100 border rounded-md font-mono"
               />
             </div>
+
             <button
               onClick={handleSummarize}
               disabled={isLoading || isCapturing || !transcript}

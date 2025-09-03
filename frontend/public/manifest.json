@@ -3,7 +3,13 @@
   "name": "GMeet Summarizer",
   "version": "1.0",
   "description": "Captures Google Meet captions and summarizes the meeting.",
-  "permissions": ["storage", "activeTab", "scripting", "identity"],
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting",
+    "identity",
+    "tabCapture"
+  ],
   "action": {
     "default_popup": "index.html"
   },
