@@ -3,7 +3,7 @@
   "name": "GMeet Summarizer",
   "version": "1.0",
   "description": "Captures Google Meet captions and summarizes the meeting.",
-  "permissions": ["storage", "activeTab", "scripting"],
+  "permissions": ["storage", "activeTab", "scripting", "identity"],
   "action": {
     "default_popup": "index.html"
   },
@@ -13,5 +13,13 @@
       "resources": ["content.js"],
       "matches": ["https://meet.google.com/*"]
     }
-  ]
+  ],
+  "oauth2": {
+    "client_id": "88787431108-ot9q7nii4mqde1lojv69pn13jf47cjjf.apps.googleusercontent.com",
+    "scopes": [
+      "https://www.googleapis.com/auth/userinfo.email",
+      "https://www.googleapis.com/auth/gmail.send",
+      "https://www.googleapis.com/auth/calendar.events"
+    ]
+  }
 }

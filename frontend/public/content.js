@@ -1,76 +1,92 @@
-// This script is injected into the Google Meet page to continuously observe captions.
+// This script is injected into the Google Meet page to continuously observe and save captions.
 
-let observer = null;
-let recordedTranscript = new Set(); // Use a Set to avoid duplicate entries from DOM re-renders
+// ✅ FINAL FIX: Encapsulate all logic in a single object attached to the window.
+// This is a more robust guard that prevents any possibility of re-declaration errors.
+if (typeof window.gmeetSummarizer === "undefined") {
+  window.gmeetSummarizer = {
+    observer: null,
+    STORAGE_KEY: "gmeet_transcript",
 
-// The main function to start observing caption changes
-function startObserver() {
-  // The class for the container that holds all caption lines
-  const CAPTION_CONTAINER_CLASS = 'a4cQT'; 
-  const targetNode = document.querySelector(`.${CAPTION_CONTAINER_CLASS}`);
+    // Main function to start observing caption changes
+    startObserver: function () {
+      const CAPTION_CONTAINER_CLASS = "a4cQT";
+      const targetNode = document.querySelector(`.${CAPTION_CONTAINER_CLASS}`);
 
-  if (!targetNode) {
-    console.error('GMeet Summarizer: Caption container not found.');
-    // Inform the popup that the container is missing so it can show an error
-    chrome.runtime.sendMessage({ type: 'error', text: 'Caption container not found. Are captions enabled?' });
-    return;
-  }
-  
-  // A function to process and send newly added caption text
-  const sendNewCaption = (node) => {
-    if (node.nodeType === Node.TEXT_NODE && node.textContent.trim() !== '') {
-        // This handles cases where text is added directly
-        const text = node.textContent.trim();
-        if (!recordedTranscript.has(text)) {
-            recordedTranscript.add(text);
-            chrome.runtime.sendMessage({ type: 'new_caption', text: text });
+      if (!targetNode) {
+        console.error("GMeet Summarizer: Caption container not found.");
+        chrome.runtime.sendMessage({
+          type: "error",
+          text: "Caption container not found. Are captions enabled?",
+        });
+        return;
+      }
+
+      // Function to process and save new caption text
+      const saveNewCaption = (node) => {
+        const text = (
+          node.nodeType === Node.TEXT_NODE ? node.textContent : node.innerText
+        )?.trim();
+        if (!text) return;
+
+        chrome.storage.local.get([this.STORAGE_KEY], (result) => {
+          const existingTranscript = result[this.STORAGE_KEY] || "";
+          const lastSentences = existingTranscript.slice(-100);
+
+          if (!lastSentences.includes(text)) {
+            const updatedTranscript = existingTranscript + text + " ";
+            chrome.storage.local.set({ [this.STORAGE_KEY]: updatedTranscript });
+          }
+        });
+      };
+
+      targetNode.childNodes.forEach(saveNewCaption);
+
+      const config = { childList: true, subtree: true, characterData: true };
+
+      const callback = (mutationsList) => {
+        for (const mutation of mutationsList) {
+          if (mutation.type === "childList") {
+            mutation.addedNodes.forEach(saveNewCaption);
+          } else if (mutation.type === "characterData") {
+            saveNewCaption(mutation.target);
+          }
         }
-    } else if (node.nodeType === Node.ELEMENT_NODE && node.innerText) {
-        // This handles cases where new elements with text are added
-        const text = node.innerText.trim();
-        if (text && !recordedTranscript.has(text)) {
-            recordedTranscript.add(text);
-            chrome.runtime.sendMessage({ type: 'new_caption', text: text });
+      };
+
+      this.observer = new MutationObserver(callback);
+      this.observer.observe(targetNode, config);
+      console.log("GMeet Summarizer: Observer started.");
+    },
+
+    // Function to handle the 'start' command from the popup
+    handleStart: function (sendResponse) {
+      chrome.storage.local.set({ [this.STORAGE_KEY]: "" }, () => {
+        if (this.observer) {
+          this.observer.disconnect();
         }
-    }
+        this.startObserver();
+        sendResponse({ status: "Observer started" });
+      });
+    },
+
+    // Function to handle the 'stop' command from the popup
+    handleStop: function (sendResponse) {
+      if (this.observer) {
+        this.observer.disconnect();
+        this.observer = null;
+        console.log("GMeet Summarizer: Observer stopped.");
+      }
+      sendResponse({ status: "Observer stopped" });
+    },
   };
 
-  // Pre-process any captions that are already on the screen when we start
-  targetNode.childNodes.forEach(sendNewCaption);
-
-  const config = { childList: true, subtree: true, characterData: true };
-
-  const callback = (mutationsList, obs) => {
-    for (const mutation of mutationsList) {
-        if (mutation.type === 'childList') {
-            mutation.addedNodes.forEach(sendNewCaption);
-        } else if (mutation.type === 'characterData') {
-            // This handles live-typing updates within the same element
-            sendNewCaption(mutation.target);
-        }
+  // Listen for messages from the popup (App.jsx) and route them to the correct handler
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message.command === "start") {
+      window.gmeetSummarizer.handleStart(sendResponse);
+    } else if (message.command === "stop") {
+      window.gmeetSummarizer.handleStop(sendResponse);
     }
-  };
-
-  observer = new MutationObserver(callback);
-  observer.observe(targetNode, config);
-  console.log('GMeet Summarizer: Observer started.');
+    return true; // Keep the message channel open for async response.
+  });
 }
-
-// Listen for messages from the popup (App.jsx)
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.command === 'start') {
-    recordedTranscript.clear(); // Clear previous recording
-    if (!observer) {
-      startObserver();
-    }
-    sendResponse({ status: 'Observer started' });
-  } else if (message.command === 'stop') {
-    if (observer) {
-      observer.disconnect();
-      observer = null;
-      console.log('GMeet Summarizer: Observer stopped.');
-    }
-    sendResponse({ status: 'Observer stopped' });
-  }
-  return true; // Keep the message channel open for async response
-});
